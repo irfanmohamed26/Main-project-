@@ -1,0 +1,103 @@
+RBA5D2x python code
+
+import serial
+import time
+import paho.mqtt.client as mqtt
+import json
+import socket
+
+# UART Configuration
+SERIAL_PORT = "/dev/ttyS3"  # Change if needed
+BAUD_RATE = 115200
+
+# MQTT Configuration
+ACCESS_TOKEN = 'w9Bm9VYFxFhl6BqjWvpL'
+BROKER = "167.179.83.158"
+PORT = 1884
+PUBLISH_TOPIC = "v1/devices/me/telemetry"
+SUBSCRIBE_TOPIC = "v1/devices/me/rpc/request/+"
+
+# Connect to Serial Port
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    print("Connected to {} at {} baud.".format(SERIAL_PORT, BAUD_RATE))
+    ser.flush()
+except serial.SerialException as e:
+    print("Failed to connect to {}: {}".format(SERIAL_PORT, e))
+    exit(1)
+
+# Callback for MQTT connection
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to MQTT broker")
+        client.subscribe(SUBSCRIBE_TOPIC)
+    else:
+        print("Failed to connect, return code {}".format(rc))
+
+# Callback for MQTT disconnection
+def on_disconnect(client, userdata, rc):
+    print("Disconnected from MQTT broker")
+    if rc != 0:
+        print("Unexpected disconnection. Reconnecting...")
+        time.sleep(5)
+        client.reconnect()
+
+# Callback for received messages
+def on_message(client, userdata, msg):
+    message = msg.payload.decode()
+    print("Received message: {} {}".format(msg.topic, message))
+    
+    try:
+        payload = json.loads(message)
+        method = payload.get("method", "")
+        params = payload.get("params", "")
+        
+        if method == "setValue":
+            request_id = msg.topic.split("/")[-1]
+            response_topic = "v1/devices/me/rpc/response/{}".format(request_id)
+            client.publish(response_topic, json.dumps({"success": True}), qos=1)
+            print("Command received: {}".format(params))  # Display received command in Minicom
+    except json.JSONDecodeError:
+        print("Error decoding JSON in received MQTT message")
+
+# Function to publish data every 5 seconds
+def publish_hello():
+    while True:
+        payload = {"message": "hello"}
+        payload_str = json.dumps(payload)
+        mqtt_client.publish(PUBLISH_TOPIC, payload_str, qos=1)
+        print("Published: hello")
+        time.sleep(5)
+
+# Initialize MQTT client
+mqtt_client = mqtt.Client("MQTTSubscriber")
+mqtt_client.on_connect = on_connect
+mqtt_client.on_message = on_message
+mqtt_client.on_disconnect = on_disconnect
+mqtt_client.username_pw_set(ACCESS_TOKEN)
+mqtt_client.connect(BROKER, PORT, keepalive=60)
+mqtt_client._sockpairR, mqtt_client._sockpairW = socket.socketpair()
+
+# Start MQTT loop in a separate thread
+import threading
+mqtt_thread = threading.Thread(target=mqtt_client.loop_forever)
+mqtt_thread.start()
+
+# Read data from UART
+print("Waiting for data from USART...")
+try:
+    while True:
+        if ser.in_waiting > 0:
+            received = ser.readline().decode('utf-8', errors='ignore').strip()
+            print("Received from UART: {}".format(received))  # Print received data
+            payload = {"uart_data": received}
+            mqtt_client.publish(PUBLISH_TOPIC, json.dumps(payload), qos=1)
+            print("Published UART data to MQTT")
+        time.sleep(0.2)
+except KeyboardInterrupt:
+    print("\nExiting program...")
+finally:
+    if ser.is_open:
+        ser.close()
+    mqtt_client.disconnect()
+    print("Serial and MQTT connections closed.")
